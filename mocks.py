@@ -33,6 +33,16 @@ def get_vector_store():
             embedding_function=embeddings,
             collection_name="it_knowledge_base"
         )
+        
+        # Auto-seed the database if it is empty (e.g., on first boot in production)
+        if _vector_store._collection.count() == 0:
+            print("Initializing Vector DB: Empty database detected. Auto-seeding...")
+            texts = [doc["content"] for doc in IT_KNOWLEDGE_BASE]
+            metadatas = [{"title": doc["title"], "id": doc["id"]} for doc in IT_KNOWLEDGE_BASE]
+            ids = [doc["id"] for doc in IT_KNOWLEDGE_BASE]
+            _vector_store.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+            print("Initialization Complete: Added IT Knowledge Base to Vector DB.")
+            
     return _vector_store
 
 def search_knowledge_base(query: str) -> str:
