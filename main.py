@@ -19,8 +19,14 @@ app = FastAPI(title="Command Center API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # For dev purposes
-    allow_credentials=True,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://*.vercel.app", # allow vercel preview deployments
+        "https://faroukhajjej.com", # assuming this is the production domain
+        "*" # Fallback for now, but with credentials=False it works
+    ],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
