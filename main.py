@@ -159,6 +159,11 @@ orchestrator = workflow.compile()
 class TicketRequest(BaseModel):
     issue: str
 
+@app.get("/")
+async def health_check():
+    """Health check endpoint for Render."""
+    return {"status": "ok", "service": "Command Center API"}
+
 @app.post("/api/v1/orchestrate")
 async def start_orchestration(request: TicketRequest):
     """
