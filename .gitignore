@@ -1,0 +1,30 @@
+# Environments
+.env
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Vector DB
+.chroma_db/
+.chroma_db_backup/
+
+# Logs and outputs
+output.txt
+output2.txt
+
+# Editor/OS files
+.DS_Store
+.vscode/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

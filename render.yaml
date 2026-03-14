@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: command-center-api
+    env: docker
+    region: frankfurt # Optional: Choose region closest to users
+    plan: free # Can be upgraded as needed
+    healthCheckPath: /
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false # Requires manual entry in Render dashboard
+      - key: OPENAI_API_KEY
+        sync: false
+    # Optional: persistent disk for ChromaDB to avoid re-seeding every deploy
+    # disk:
+    #   name: chromadb-data
+    #   mountPath: /app/.chroma_db
+    #   sizeGB: 1
