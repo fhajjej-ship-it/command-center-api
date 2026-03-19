@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 from typing import Dict, List, Any, TypedDict, Annotated
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -10,12 +10,19 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
 
 from mocks import search_knowledge_base
+from database import init_db, get_db, Lead
+
 
 load_dotenv()
 
 app = FastAPI(title="Command Center API", version="1.0.0")
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -163,6 +170,36 @@ class TicketRequest(BaseModel):
 async def health_check():
     """Health check endpoint for Render."""
     return {"status": "ok", "service": "Command Center API"}
+
+class LeadCreate(BaseModel):
+    email: str
+    company_domain: str | None = None
+    payload: Dict[str, Any] | None = None
+    draft: str | None = None
+
+@app.post("/api/v1/leads")
+async def create_lead(lead_in: LeadCreate, db: Session = Depends(get_db)):
+    """Receives leads from the portfolio frontend and stores them in the SQLite DB."""
+    # Try to extract company domain from payload if not provided directly
+    company_domain = lead_in.company_domain
+    if not company_domain and lead_in.payload:
+        company_domain = lead_in.payload.get("company_domain", "")
+        
+    full_payload = json.dumps({
+        "payload": lead_in.payload,
+        "draft": lead_in.draft
+    }) if lead_in.payload or lead_in.draft else None
+    
+    db_lead = Lead(
+        email=lead_in.email,
+        company_domain=company_domain,
+        payload=full_payload
+    )
+    db.add(db_lead)
+    db.commit()
+    db.refresh(db_lead)
+    return {"status": "success", "lead_id": db_lead.id, "message": "Lead saved successfully"}
+
 
 @app.post("/api/v1/orchestrate")
 async def start_orchestration(request: TicketRequest):
