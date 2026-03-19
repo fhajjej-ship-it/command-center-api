@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 from typing import Dict, List, Any, TypedDict, Annotated
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -200,6 +200,34 @@ async def create_lead(lead_in: LeadCreate, db: Session = Depends(get_db)):
     db.refresh(db_lead)
     return {"status": "success", "lead_id": db_lead.id, "message": "Lead saved successfully"}
 
+async def verify_admin(x_api_key: str = Header(None)):
+    expected_key = os.getenv("ADMIN_PASSWORD")
+    if expected_key and x_api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not expected_key:
+        print("WARNING: ADMIN_PASSWORD not set in environment. Access granted.")
+
+@app.get("/api/v1/leads", dependencies=[Depends(verify_admin)])
+async def get_leads(db: Session = Depends(get_db)):
+    """Retrieves all leads from the database ordered by newest first."""
+    leads = db.query(Lead).order_by(Lead.created_at.desc()).all()
+    
+    result = []
+    for lead in leads:
+        lead_dict = {
+            "id": lead.id,
+            "email": lead.email,
+            "company_domain": lead.company_domain,
+            "created_at": lead.created_at.isoformat() if lead.created_at else None,
+        }
+        try:
+            lead_dict["payload"] = json.loads(lead.payload) if lead.payload else None
+        except:
+            lead_dict["payload"] = lead.payload
+            
+        result.append(lead_dict)
+        
+    return {"status": "success", "leads": result}
 
 @app.post("/api/v1/orchestrate")
 async def start_orchestration(request: TicketRequest):
