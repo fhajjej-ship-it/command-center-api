@@ -18,6 +18,7 @@ class Lead(Base):
     email = Column(String, index=True)
     company_domain = Column(String, index=True, nullable=True)
     payload = Column(Text, nullable=True)  # Store JSON string of the drafted payload
+    status = Column(String, default="New", index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 def init_db():

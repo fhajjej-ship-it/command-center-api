@@ -177,6 +177,9 @@ class LeadCreate(BaseModel):
     payload: Dict[str, Any] | None = None
     draft: str | None = None
 
+class LeadUpdate(BaseModel):
+    status: str
+
 @app.post("/api/v1/leads")
 async def create_lead(lead_in: LeadCreate, db: Session = Depends(get_db)):
     """Receives leads from the portfolio frontend and stores them in the SQLite DB."""
@@ -218,6 +221,7 @@ async def get_leads(db: Session = Depends(get_db)):
             "id": lead.id,
             "email": lead.email,
             "company_domain": lead.company_domain,
+            "status": getattr(lead, "status", "New"),
             "created_at": lead.created_at.isoformat() if lead.created_at else None,
         }
         try:
@@ -228,6 +232,18 @@ async def get_leads(db: Session = Depends(get_db)):
         result.append(lead_dict)
         
     return {"status": "success", "leads": result}
+
+@app.patch("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_admin)])
+async def update_lead_status(lead_id: int, lead_update: LeadUpdate, db: Session = Depends(get_db)):
+    """Updates the status of a specific lead."""
+    db_lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not db_lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    db_lead.status = lead_update.status
+    db.commit()
+    db.refresh(db_lead)
+    return {"status": "success", "message": "Lead status updated"}
 
 @app.post("/api/v1/orchestrate")
 async def start_orchestration(request: TicketRequest):
