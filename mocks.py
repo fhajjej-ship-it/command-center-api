@@ -29,7 +29,6 @@ def get_vector_store():
     if _vector_store is None:
         embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
         _vector_store = Chroma(
-            persist_directory="./.chroma_db",
             embedding_function=embeddings,
             collection_name="it_knowledge_base"
         )

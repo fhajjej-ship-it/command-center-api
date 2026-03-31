@@ -12,3 +12,6 @@ pydantic==2.10.4
 pydantic-settings==2.7.0
 google-generativeai==0.8.3
 sqlalchemy==2.0.29
+psycopg2-binary==2.9.9
+requests==2.31.0
+beautifulsoup4==4.12.3

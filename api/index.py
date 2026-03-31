@@ -11,6 +11,9 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
+import requests
+from bs4 import BeautifulSoup
+import re
 
 from mocks import search_knowledge_base
 from database import init_db, get_db, Lead
@@ -23,6 +26,13 @@ app = FastAPI(title="Command Center API", version="1.0.0")
 @app.on_event("startup")
 def on_startup():
     init_db()
+
+# --- SSE Clients ---
+sse_clients = set()
+
+async def broadcast_lead(lead_data: dict):
+    for q in list(sse_clients):
+        await q.put(lead_data)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +55,7 @@ class AgentState(TypedDict):
     kb_results: str
     final_script: str
     log_stream: list[Dict[str, str]]
+    company_domain: str
 
 # --- LLM Setup ---
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
@@ -59,18 +70,25 @@ async def triage_agent(state: AgentState):
     state["log_stream"].append(log)
     
     try:
-        prompt = f"Analyze this IT support ticket to determine if it requires knowledge retrieval. Ticket: '{user_request}'. Respond with a short, 1-sentence summary of the intent."
+        prompt = f"Analyze this request to determine if it is an IT support ticket or a request for a Sales/AI Audit of a company domain. Request: '{user_request}'. Respond with EXACTLY ONE word: either 'IT_SUPPORT' or 'SALES_LEAD'."
         response = await llm.ainvoke(prompt)
-        intent = response.content.strip().replace("\n", " ")
+        intent = response.content.strip().replace("\n", "").upper()
         
-        log = {"agent": "Triage AI", "action": f"Identified intent: '{intent[:100]}...'. Routing to Retrieval Agent.", "status": "success"}
+        if "SALES_LEAD" in intent:
+            intent = "SALES_LEAD"
+            next_agent = "sourcing_agent"
+            log = {"agent": "Triage AI", "action": f"Identified intent: SALES_LEAD. Routing to Sourcing Agent.", "status": "success"}
+        else:
+            intent = "IT_SUPPORT"
+            next_agent = "retrieval_agent"
+            log = {"agent": "Triage AI", "action": f"Identified intent: IT_SUPPORT. Routing to Retrieval Agent.", "status": "success"}
+
         state["log_stream"].append(log)
-        
-        state["current_agent"] = "retrieval_agent"
+        state["current_agent"] = next_agent
         state["messages"].append(AIMessage(content=f"Triage complete. Intent: {intent}"))
     except Exception as e:
         error_msg = str(e)
-        log = {"agent": "Triage AI", "action": f"Error analyzing ticket: {error_msg[:100]}... Routing to Fallback.", "status": "error"}
+        log = {"agent": "Triage AI", "action": f"Error analyzing request: {error_msg[:100]}... Routing to Fallback.", "status": "error"}
         state["log_stream"].append(log)
         
         # Fallback intent if LLM fails
@@ -135,6 +153,101 @@ async def action_agent(state: AgentState):
     state["messages"].append(AIMessage(content="Action plan generated."))
     return state
 
+async def sourcing_agent(state: AgentState):
+    """Scrapes the target domain for the Sales Lead flow."""
+    user_request = state["messages"][0].content
+    
+    # Extract domain using simple regex
+    domain_match = re.search(r'[\w.-]+\.\w+', user_request)
+    domain_str = domain_match.group(0) if domain_match else "example.com"
+    state["company_domain"] = domain_str
+    
+    log = {"agent": "Sourcing Agent", "action": f"Analyzing target domain: {domain_str}...", "status": "running"}
+    state["log_stream"].append(log)
+    
+    try:
+        url = f"https://{domain_str}" if not domain_str.startswith("http") else domain_str
+        response = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        for script in soup(["script", "style", "noscript", "iframe", "img", "svg"]):
+            script.extract()
+            
+        text = soup.get_text(separator=' ', strip=True)[:10000]
+        state["kb_results"] = text
+        
+        log = {"agent": "Sourcing Agent", "action": f"Successfully scraped {len(text)} characters of context from {domain_str}.", "status": "success"}
+        state["log_stream"].append(log)
+    except Exception as e:
+        error_msg = str(e)
+        log = {"agent": "Sourcing Agent", "action": f"Web scraping failed: {error_msg}. Using generic context.", "status": "error"}
+        state["log_stream"].append(log)
+        state["kb_results"] = "Could not scrape the website content directly."
+        
+    state["current_agent"] = "copywriter_agent"
+    state["messages"].append(AIMessage(content=f"Sourcing complete."))
+    return state
+
+async def copywriter_agent(state: AgentState):
+    """Drafts the hyper-personalized cold email and json payload."""
+    website_content = state["kb_results"]
+    domain = state.get("company_domain", "the target company")
+    
+    log = {"agent": "Copywriter Agent", "action": "Synthesizing CRM payload and drafting personalized engagement...", "status": "running"}
+    state["log_stream"].append(log)
+    
+    try:
+        prompt = f"""You are a Principal Applied AI Architect named Farouk Hajjej. 
+You build custom, production-ready autonomous agent swarms for enterprise clients. 
+You are analyzing the website of {domain} to generate a hyper-personalized sales pitch.
+Identify their core business and operational bottlenecks from the text below. If empty, guess. 
+Pitch applied AI and autonomous agent swarms.
+
+Website Content:
+{website_content}
+
+Output EXACTLY valid JSON with this schema:
+{{
+  "angle_detected": "string",
+  "pain_targeted": "string",
+  "subject_line": "string",
+  "confidence_score": float,
+  "cold_email_draft": "string - Format with paragraphs. Do not include 'Subject:' or greetings/signoffs."
+}}
+"""
+        response = await llm.ainvoke(prompt)
+        text = response.content.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+            
+        try:
+            data = json.loads(text)
+            
+            # Format the email draft nicely
+            full_draft = f"Subject: {data.get('subject_line', '')}\n\nHi there,\n\n{data.get('cold_email_draft', '')}\n\nBest,\nFarouk"
+            data["cold_email_draft"] = full_draft
+            
+            state["final_script"] = json.dumps(data, indent=2)
+            
+            log = {"agent": "Copywriter Agent", "action": "Sales execution payload generated. Ready for dispatch.", "status": "success"}
+            state["log_stream"].append(log)
+        except json.JSONDecodeError:
+            log = {"agent": "Copywriter Agent", "action": "JSON Parsing failed. Outputting raw text.", "status": "error"}
+            state["log_stream"].append(log)
+            state["final_script"] = text
+            
+    except Exception as e:
+        error_msg = str(e)
+        log = {"agent": "Copywriter Agent", "action": f"Synthesis failed: {error_msg}", "status": "error"}
+        state["log_stream"].append(log)
+        state["final_script"] = json.dumps({"error": "Failed to generate payload"})
+        
+    state["current_agent"] = "end"
+    state["messages"].append(AIMessage(content="Copywriting complete."))
+    return state
+
 # --- Routing ---
 def route_next_agent(state: AgentState) -> str:
     return state["current_agent"]
@@ -145,19 +258,30 @@ workflow = StateGraph(AgentState)
 workflow.add_node("triage", triage_agent)
 workflow.add_node("retrieval_agent", retrieval_agent)
 workflow.add_node("action_agent", action_agent)
+workflow.add_node("sourcing_agent", sourcing_agent)
+workflow.add_node("copywriter_agent", copywriter_agent)
 
 workflow.set_entry_point("triage")
 workflow.add_conditional_edges(
     "triage",
     route_next_agent,
-    {"retrieval_agent": "retrieval_agent"}
+    {
+        "retrieval_agent": "retrieval_agent",
+        "sourcing_agent": "sourcing_agent"
+    }
 )
 workflow.add_conditional_edges(
     "retrieval_agent",
     route_next_agent,
     {"action_agent": "action_agent"}
 )
+workflow.add_conditional_edges(
+    "sourcing_agent",
+    route_next_agent,
+    {"copywriter_agent": "copywriter_agent"}
+)
 workflow.add_edge("action_agent", END)
+workflow.add_edge("copywriter_agent", END)
 
 orchestrator = workflow.compile()
 
@@ -201,6 +325,26 @@ async def create_lead(lead_in: LeadCreate, db: Session = Depends(get_db)):
     db.add(db_lead)
     db.commit()
     db.refresh(db_lead)
+    
+    lead_dict = {
+        "id": db_lead.id,
+        "email": db_lead.email,
+        "company_domain": db_lead.company_domain,
+        "status": getattr(db_lead, "status", "New"),
+        "created_at": db_lead.created_at.isoformat() if db_lead.created_at else None,
+        "payload": lead_in.payload if lead_in.payload else None,
+        "draft": lead_in.draft if lead_in.draft else None
+    }
+    # Clean up the payload to just have one level if it was nested in create
+    try:
+        if db_lead.payload:
+            payload_json = json.loads(db_lead.payload)
+            lead_dict["payload"] = payload_json.get("payload", payload_json)
+    except:
+        pass
+
+    asyncio.create_task(broadcast_lead(lead_dict))
+    
     return {"status": "success", "lead_id": db_lead.id, "message": "Lead saved successfully"}
 
 async def verify_admin(x_api_key: str = Header(None)):
@@ -209,6 +353,25 @@ async def verify_admin(x_api_key: str = Header(None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
     if not expected_key:
         print("WARNING: ADMIN_PASSWORD not set in environment. Access granted.")
+
+@app.get("/api/v1/leads/stream")
+async def stream_leads(api_key: str = None):
+    """SSE endpoint for real-time lead updates."""
+    expected_key = os.getenv("ADMIN_PASSWORD")
+    if expected_key and api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async def event_generator():
+        q = asyncio.Queue()
+        sse_clients.add(q)
+        try:
+            while True:
+                lead_data = await q.get()
+                yield {"event": "new_lead", "data": json.dumps(lead_data)}
+        except asyncio.CancelledError:
+            sse_clients.remove(q)
+    
+    return EventSourceResponse(event_generator())
 
 @app.get("/api/v1/leads", dependencies=[Depends(verify_admin)])
 async def get_leads(db: Session = Depends(get_db)):
@@ -284,33 +447,52 @@ async def stream_agent_execution(issue: str):
         try:
             # We manually step through the compiled graph to yield progress
             # 1. Triage
-            yield {"data": json.dumps({"agent": "System", "action": f"Received IT Ticket: '{issue}'", "status": "info"})}
-            await asyncio.sleep(1)
+            yield {"data": json.dumps({"agent": "System", "action": f"Received Request: '{issue}'", "status": "info"})}
+            await asyncio.sleep(0.5)
             
             state = await triage_agent(state)
             for log in state["log_stream"]:
                 yield {"data": json.dumps(log)}
                 await asyncio.sleep(0.5)
             state["log_stream"] = [] # clear for next node
+            
+            if state["current_agent"] == "sourcing_agent":
+                # SALES_LEAD Route
+                yield {"data": json.dumps({"agent": "System", "action": "Routing to Sourcing Agent...", "status": "routing"})}
+                await asyncio.sleep(0.5)
                 
-            # 2. Retrieval
-            yield {"data": json.dumps({"agent": "System", "action": "Routing to Retrieval Agent...", "status": "routing"})}
-            await asyncio.sleep(1)
-            
-            state = await retrieval_agent(state)
-            for log in state["log_stream"]:
-                yield {"data": json.dumps(log)}
+                state = await sourcing_agent(state)
+                for log in state["log_stream"]:
+                    yield {"data": json.dumps(log)}
+                    await asyncio.sleep(0.5)
+                state["log_stream"] = []
+
+                yield {"data": json.dumps({"agent": "System", "action": "Routing to Copywriter Agent...", "status": "routing"})}
                 await asyncio.sleep(0.5)
-            state["log_stream"] = []
-            
-            # 3. Action
-            yield {"data": json.dumps({"agent": "System", "action": "Routing to Action Agent...", "status": "routing"})}
-            await asyncio.sleep(1)
-            
-            state = await action_agent(state)
-            for log in state["log_stream"]:
-                yield {"data": json.dumps(log)}
+                
+                state = await copywriter_agent(state)
+                for log in state["log_stream"]:
+                    yield {"data": json.dumps(log)}
+                    await asyncio.sleep(0.5)
+            else:
+                # IT_SUPPORT Route
+                yield {"data": json.dumps({"agent": "System", "action": "Routing to Retrieval Agent...", "status": "routing"})}
                 await asyncio.sleep(0.5)
+                
+                state = await retrieval_agent(state)
+                for log in state["log_stream"]:
+                    yield {"data": json.dumps(log)}
+                    await asyncio.sleep(0.5)
+                state["log_stream"] = []
+                
+                # 3. Action
+                yield {"data": json.dumps({"agent": "System", "action": "Routing to Action Agent...", "status": "routing"})}
+                await asyncio.sleep(0.5)
+                
+                state = await action_agent(state)
+                for log in state["log_stream"]:
+                    yield {"data": json.dumps(log)}
+                    await asyncio.sleep(0.5)
                 
             # Final result payload
             final_payload = {
@@ -318,7 +500,7 @@ async def stream_agent_execution(issue: str):
                 "action": "Workflow Complete", 
                 "status": "complete",
                 "script": state["final_script"],
-                "kb_context": state["kb_results"]
+                "kb_context": state.get("kb_results", "")
             }
             yield {"data": json.dumps(final_payload)}
             
